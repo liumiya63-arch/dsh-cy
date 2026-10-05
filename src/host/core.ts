@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, ex
 import { join, resolve } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { parse } from 'yaml';
+import { initGraph, graphState, addGraph } from './graph.js';
 
 type Input = Record<string, unknown>;
 type Row = Record<string, unknown>;
@@ -34,7 +35,11 @@ export class CyberCore {
       CREATE TABLE IF NOT EXISTS chains(id INTEGER PRIMARY KEY,"from" INTEGER REFERENCES assets(id) ON DELETE CASCADE,"to" INTEGER REFERENCES assets(id) ON DELETE CASCADE,label TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,action TEXT NOT NULL,actor TEXT NOT NULL,detail TEXT NOT NULL,prev_hash TEXT,hash TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-      PRAGMA user_version=1;`);
+      `);
+    const version = Number(this.db.prepare('PRAGMA user_version').get()?.user_version ?? 0);
+    if (version > 2) { this.db.close(); throw new Error('Database schema is newer than this plugin'); }
+    initGraph(this.db);
+    this.db.exec('PRAGMA user_version=2;');
     this.db.prepare("UPDATE tasks SET status='interrupted' WHERE status='running'").run();
     if (existsSync(recipesPath)) for (const file of readdirSync(recipesPath, { recursive: true })) {
       if (typeof file !== 'string' || !file.endsWith('.yaml')) continue;
@@ -50,8 +55,8 @@ export class CyberCore {
   }
   private all(table: string): Row[] { return this.db.prepare(`SELECT * FROM ${table} ORDER BY id DESC LIMIT 500`).all() as Row[]; }
   private decode(row: Row): Row { const result = { ...row }; for (const field of ['params', 'result', 'metadata', 'detail']) if (typeof result[field] === 'string') { try { result[field] = JSON.parse(result[field] as string); } catch { /* Preserve malformed stored evidence. */ } } return result; }
-  snapshot(): Row {
-    return { assets: this.all('assets').map(r => this.decode(r)), vulnerabilities: this.all('vulnerabilities'), tasks: this.all('tasks').map(r => this.decode(r)), approvals: this.all('approvals').map(r => this.decode(r)), knowledge: this.all('knowledge').map(({ text: _, ...row }) => row), chains: this.all('chains'), audit: this.db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT 200').all().map(r => this.decode(r as Row)), recipes: this.recipes, capabilities: { webshell: false, c2: false, retrieval: 'fts5', schemaVersion: 1 } };
+  snapshot(scope = 'workspace'): Row {
+    return { graph: graphState(this.db, scope), scope, assets: this.all('assets').map(r => this.decode(r)), vulnerabilities: this.all('vulnerabilities'), tasks: this.all('tasks').map(r => this.decode(r)), approvals: this.all('approvals').map(r => this.decode(r)), knowledge: this.all('knowledge').map(({ text: _, ...row }) => row), chains: this.all('chains'), audit: this.db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT 200').all().map(r => this.decode(r as Row)), recipes: this.recipes, capabilities: { webshell: false, c2: false, retrieval: 'fts5', schemaVersion: 2 } };
   }
   private auditInTransaction(action: string, detail: unknown, actor: string): void {
     const prev = this.db.prepare('SELECT seq,hash FROM audit ORDER BY seq DESC LIMIT 1').get();
@@ -84,7 +89,11 @@ export class CyberCore {
   }
   async dispatch(action: string, input: Input = {}, actor = 'agent'): Promise<unknown> {
     if (this.disposed) throw new Error('Plugin disposed');
-    if (action === 'snapshot') return this.snapshot();
+    const scope = input.scope === undefined ? 'workspace' : text(input.scope, 'scope', 200);
+    if (action === 'snapshot') return this.snapshot(scope);
+    if (action === 'graph.state' || action === 'graph.graph') return graphState(this.db, scope);
+    if (action === 'graph.report') return { scope, graph: graphState(this.db, scope), audit: this.verify(), execution: 'Only persisted evidence; approval is user-only' };
+    if (action.startsWith('graph.add_')) return this.mutate(action, input, actor, () => addGraph(this.db, action.slice(10), input, scope));
     if (action === 'audit.verify') { const result = this.verify(); if (result.ok) this.recoverMirror(); return result; }
     if (action === 'asset.create') return this.mutate(action, input, actor, () => {
       const type = choice(input.type, ['domain', 'ip', 'port', 'service'], 'type');

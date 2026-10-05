@@ -1,0 +1,16 @@
+export const cyberTools = [
+  { name:'cyber_state', action:'snapshot', description:'Read Cyber workspace state, recipes, approvals and exploration graph.', fields:{}, required:[] },
+  { name:'cyber_graph', action:'graph.graph', description:'Read the persisted exploration graph.', fields:{}, required:[] },
+  { name:'cyber_report', action:'graph.report', description:'Export evidence graph and audit verification.', fields:{}, required:[] },
+  { name:'cyber_add_goal', action:'graph.add_goal', description:'Record a goal without clearing prior records.', fields:{target:{type:'string'},objective:{type:'string'},authorization:{type:'string'}}, required:['target','objective'] },
+  { name:'cyber_add_intent', action:'graph.add_intent', description:'Record a verification intent derived from an existing goal or fact.', fields:{sourceId:{type:'string'},title:{type:'string'},detail:{type:'string'}}, required:['sourceId','title'] },
+  { name:'cyber_add_fact', action:'graph.add_fact', description:'Record observed evidence under an intent; confidence is 0..1.', fields:{intentId:{type:'string'},kind:{type:'string',enum:['port','service','http','info','vuln']},target:{type:'string'},detail:{type:'string'},confidence:{type:'number',minimum:0,maximum:1}}, required:['intentId','detail'] },
+  { name:'cyber_add_finding', action:'graph.add_finding', description:'Record a finding with ordered reproducible evidence steps.', fields:{intentId:{type:'string'},title:{type:'string'},severity:{type:'string',enum:['critical','high','medium','low','info']},description:{type:'string'},reproducibleSteps:{type:'array',items:{type:'string'},minItems:1},affectedAssetId:{type:'string'}}, required:['intentId','title','severity','description','reproducibleSteps'] },
+  { name:'cyber_add_asset', action:'graph.add_asset', description:'Record an asset and optional parent relationship.', fields:{type:{type:'string',enum:['domain','root-domain','subdomain','ip','port','service','app','endpoint']},value:{type:'string'},meta:{type:'string'},parentId:{type:'string'}}, required:['type','value'] },
+  { name:'cyber_add_edge', action:'graph.add_edge', description:'Connect existing graph records in the same scope.', fields:{sourceId:{type:'string'},targetId:{type:'string'},kind:{type:'string',enum:['spawns','yields','derived_from','proves','parent','affects','related']}}, required:['sourceId','targetId','kind'] },
+  { name:'cyber_task_run', action:'task.run', description:'Request an audited recipe task. External commands wait for user approval.', fields:{recipe:{type:'string'},params:{type:'object',additionalProperties:true}}, required:['recipe'] },
+  { name:'cyber_task_cancel', action:'task.cancel', description:'Cancel a running task.', fields:{id:{type:'integer',minimum:1}}, required:['id'] },
+  { name:'cyber_knowledge_search', action:'knowledge.search', description:'Retrieve evidence from the FTS5 knowledge index.', fields:{query:{type:'string'}}, required:['query'] },
+  { name:'cyber_knowledge_ingest', action:'knowledge.ingest', description:'Persist reusable evidence in the knowledge index.', fields:{title:{type:'string'},text:{type:'string'}}, required:['title','text'] },
+  { name:'cyber_audit_verify', action:'audit.verify', description:'Verify database hash chain and append-only JSONL mirror.', fields:{}, required:[] },
+];

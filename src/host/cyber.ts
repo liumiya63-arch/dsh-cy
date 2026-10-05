@@ -2,6 +2,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { CyberCore } from './core.js';
+import { cyberTools } from './tools.js';
 interface HostContext {
   effect(effect: () => (() => void | Promise<void>)): unknown;
   webServer: { register(route: { kind: 'prefix'; path: string; handler(req: IncomingMessage, res: ServerResponse): Promise<void> }): () => void };
@@ -9,11 +10,12 @@ interface HostContext {
 }
 export const name = 'dsh-cyber';
 export const inject = ['webServer', 'tools'];
-const actions = ['snapshot','asset.create','asset.delete','vulnerability.create','vulnerability.update','chain.create','knowledge.ingest','knowledge.search','task.run','task.cancel','audit.verify'];
+const actions = ['snapshot','asset.create','asset.delete','vulnerability.create','vulnerability.update','chain.create','knowledge.ingest','knowledge.search','task.run','task.cancel','audit.verify',...cyberTools.map(t => t.action)];
 export function apply(ctx: HostContext, config: { dataPath?: string; recipesPath?: string } = {}): void {
   ctx.effect(() => {
     const core = new CyberCore(config.dataPath ?? join(process.env.DSH_PROFILE_DIR ?? process.cwd(), 'cyber-data'), config.recipesPath ?? join(dirname(fileURLToPath(import.meta.url)), '../../recipes'));
     const toolDispose = ctx.tools.register({ name: 'cyber_manage', description: 'Manage DSH Cyber assets, findings, knowledge and audited tool tasks. Call snapshot first to discover recipes and task state. Approval decisions are user-only.', parameters: { type: 'object', properties: { action: { type: 'string', enum: actions }, input: { type: 'object', additionalProperties: true } }, required: ['action'], additionalProperties: false }, output: { schema: { type: 'object', properties: { result: {} }, required: ['result'] }, render: (_args: unknown, value: unknown) => [{ type: 'text', text: JSON.stringify(value) }] }, execute: async (args: { action: string; input?: Record<string, unknown> }) => { if (!actions.includes(args.action)) throw new Error('Action not available to agents'); return { result: await core.dispatch(args.action, args.input ?? {}, 'agent') }; } });
+    const extraDisposers = cyberTools.map(tool => ctx.tools.register({ name: tool.name, description: tool.description, parameters: { type: 'object', properties: { ...tool.fields, scope: { type: 'string', description: 'Graph namespace; defaults to shared workspace. This is a namespace, not an access-control boundary.' } }, required: tool.required, additionalProperties: false }, output: { schema: { type: 'object', properties: { result: {} }, required: ['result'] }, render: (_args: unknown, value: unknown) => [{ type: 'text', text: JSON.stringify(value) }] }, execute: async (args: Record<string, unknown>) => ({ result: await core.dispatch(tool.action, args, 'agent') }) }));
     const routeDispose = ctx.webServer.register({ kind: 'prefix', path: '/api/cyber', handler: async (req, res) => {
       res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.setHeader('Cache-Control', 'no-store');
       try {
@@ -27,6 +29,6 @@ export function apply(ctx: HostContext, config: { dataPath?: string; recipesPath
         const value = await core.dispatch(body.action, body, 'user'); res.end(JSON.stringify({ ok: true, value }));
       } catch (error) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })); }
     } });
-    return async () => { routeDispose(); toolDispose(); await core.dispose(); };
+    return async () => { routeDispose(); toolDispose(); for (const dispose of extraDisposers) dispose(); await core.dispose(); };
   });
 }

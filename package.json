@@ -1,10 +1,10 @@
 {
   "name": "@liumiya63/dsh-cyber",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Cyber workspace integrated into DSH",
-  "exports": { ".": "./lib/host/index.js", "./client": "./client.js", "./package.json": "./package.json", "./locale/*.json": "./locale/*.json" },
+  "exports": { ".": "./lib/host/index.js", "./host": "./lib/host/cyber.js", "./client": "./client.js", "./package.json": "./package.json", "./locale/*.json": "./locale/*.json" },
   "files": ["lib", "client.js", "recipes", "locale", "icon.svg", "cordis.patch.yml"],
   "icon": "./icon.svg",
   "engines": { "node": ">=22.13" },
