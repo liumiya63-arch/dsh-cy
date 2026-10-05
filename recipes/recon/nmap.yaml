@@ -1,0 +1,13 @@
+name: nmap-service
+command: nmap
+args: ['-sV', '-p', '{ports}', '--', '{target}']
+parameters:
+  target:
+    required: true
+    pattern: '^[a-zA-Z0-9][a-zA-Z0-9.:-]*$'
+  ports:
+    default: '1-1000'
+    pattern: '^[0-9,-]+$'
+timeout: 300
+risk_level: medium
+requires_approval: true

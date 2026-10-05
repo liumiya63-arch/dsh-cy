@@ -1,0 +1,775 @@
+# dsh-cyber 开发文档
+
+**版本**：v1.0.0-draft  
+**最后更新**：2026-10-05  
+**基础项目**：anywhere-labs/dsh-desktop  
+**参考项目**：AIPentest/CyberStrikeAI
+
+
+## 1. 项目概述
+
+### 1.1 项目定位
+
+dsh-cyber 是一个基于 DSH Desktop 二次开发的 **AI 原生安全智能执行中枢桌面版**。它将 CyberStrikeAI 的安全能力（AI 智能体编排、YAML 工具配方、资产/漏洞管理、攻击链建模）以 **Cordis 插件**的形式集成到 DSH Desktop 的 Electron 壳中，产出 Windows 可安装的 `.exe` 和便携版 `.exe`。
+
+### 1.2 核心设计原则
+
+**不 Fork 上游源码**：DSH Desktop 的设计哲学是“桌面本身也是插件”，一切通过 Cordis 插件的 `apply` 函数、`inject` 声明、`ctx.effect()` 生命周期来扩展。dsh-cyber 必须以独立插件形式存在，不修改 `dsh-plugin-desktop` 源码。
+
+**跨语言桥接**：CyberStrikeAI 是 Go 语言构建的单体 Web 应用，使用 Eino 框架做多智能体编排。dsh-cyber 用 **TypeScript 重新实现**其核心逻辑，工具通过 Node 子进程调用，不移植 Go 代码。
+
+**高风险功能默认关闭**：WebShell 管理和 C2 功能在第一期只做 UI 占位符和审批流接口，不实现可用的执行器。
+
+**许可证合规**：CyberStrikeAI 使用 **AGPL-3.0 许可证**（另有来源显示为 Apache 2.0，需以实际仓库为准）。dsh-cyber 不得直接复制 CyberStrikeAI 的源码，只参考功能设计，独立实现。
+
+### 1.3 技术栈对比
+
+| 维度 | DSH Desktop（基础） | CyberStrikeAI（参考） | dsh-cyber（目标） |
+|---|---|---|---|
+| 运行时 | Electron + Node.js | Go 1.24+ | Electron + Node.js |
+| 插件系统 | Cordis（一切皆插件） | MCP + Eino | Cordis 插件 |
+| 前端 | Web UI（Slot 机制） | 静态前端 | Web UI（复用 Slot） |
+| 持久化 | DSH storage / 插件自有 | SQLite | better-sqlite3 |
+| AI 编排 | DSH Agent 运行时 | Eino（Deep/Plan-Execute/Supervisor） | DSH Agent + 自建编排层 |
+| 工具集成 | 插件路由/RPC | MCP + YAML 配方 | YAML 配方 + Node 子进程 |
+| 打包 | electron-builder | Go 编译 | electron-builder |
+
+
+## 2. 架构设计
+
+### 2.1 整体架构
+
+DSH Desktop 的 Electron 可执行文件只包含最小启动代码，它获取单实例锁、解析选中的 DSH profile、提供原生运行时能力，并在 Electron main 进程中启动 **Host Cordis 根**。`desktop-shell` Host 插件通过 Cordis effect 拥有 `BrowserWindow`、导航策略、settings namespace 和关闭/退出生命周期。
+
+dsh-cyber 作为新增的 Cordis 插件，同时提供 **Host service** 和 **Web Client** 两个 face。Host face 运行在 Electron main 进程的 Host Cordis generation 中，Client face 渲染在沙箱化的 renderer 中。
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  Electron Main Process                │
+│  ┌─────────────────────────────────────────────┐    │
+│  │         Host Cordis Root (generation)        │    │
+│  │  ┌──────────────┐  ┌──────────────────────┐ │    │
+│  │  │ desktop-shell │  │   dsh-plugin-cyber   │ │    │
+│  │  │ (BrowserWindow│  │   (Host face)        │ │    │
+│  │  │  settings ns  │  │   - agent 编排        │ │    │
+│  │  │  lifecycle)   │  │   - tool 执行器       │ │    │
+│  │  └──────────────┘  │   - SQLite 持久化     │ │    │
+│  │                     │   - 审计哈希链        │ │    │
+│  │                     │   - 审批中心          │ │    │
+│  │                     └──────────────────────┘ │    │
+│  └─────────────────────────────────────────────┘    │
+│                         │ IPC / RPC                  │
+│  ┌─────────────────────▼─────────────────────────┐  │
+│  │         Sandboxed Renderer (Web UI)            │  │
+│  │  ┌────────────────────────────────────────┐   │  │
+│  │  │  dsh-plugin-cyber (Client face)         │   │  │
+│  │  │  - 仪表盘 / 资产 / 漏洞 / 攻击链         │   │  │
+│  │  │  - 审计日志 / 审批中心 / 设置            │   │  │
+│  │  │  - 复用 DSH Slot 机制注册页面            │   │  │
+│  │  └────────────────────────────────────────┘   │  │
+│  └──────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+```
+
+### 2.2 目录结构
+
+```
+dsh-cyber/                              # 你的新仓库
+├── dsh-plugin-desktop/                 # DSH Desktop 原有插件（保持不动）
+├── dsh-plugin-cyber/                   # 🆕 dsh-cyber 核心插件
+│   ├── src/
+│   │   ├── host/                       # 宿主端（Node 进程）
+│   │   │   ├── index.ts                # 插件入口，导出 apply 函数
+│   │   │   ├── agent/                  # AI 智能体编排
+│   │   │   │   ├── orchestrator.ts     # 单/多智能体调度
+│   │   │   │   ├── modes.ts            # Deep / Plan-Execute 模式
+│   │   │   │   └── prompts.ts          # 角色提示词加载
+│   │   │   ├── tools/                  # 安全工具执行器
+│   │   │   │   ├── recipe-parser.ts    # YAML 配方解析
+│   │   │   │   ├── executor.ts         # 子进程执行
+│   │   │   │   └── registry.ts         # 工具注册表
+│   │   │   ├── knowledge/              # RAG 知识库
+│   │   │   │   ├── vector-store.ts     # LanceDB / Chroma
+│   │   │   │   └── ingest.ts           # 文档导入/切片
+│   │   │   ├── audit/                  # 审计日志
+│   │   │   │   ├── hash-chain.ts       # SQLite 哈希链
+│   │   │   │   └── jsonl-writer.ts     # 只追加 JSONL
+│   │   │   ├── database/               # SQLite 持久化
+│   │   │   │   ├── schema.ts           # 表结构定义
+│   │   │   │   └── migrations/         # 迁移脚本
+│   │   │   ├── approval/               # 审批中心
+│   │   │   │   └── workflow.ts         # 审批流引擎
+│   │   │   ├── routes.ts               # HTTP 路由注册
+│   │   │   └── services.ts             # Cordis service 注册
+│   │   ├── client/                     # 客户端（Web UI）
+│   │   │   ├── index.ts                # Client 插件入口
+│   │   │   ├── pages/                  # 页面组件
+│   │   │   │   ├── Dashboard.tsx
+│   │   │   │   ├── Assets.tsx
+│   │   │   │   ├── Vulnerabilities.tsx
+│   │   │   │   ├── AttackChain.tsx
+│   │   │   │   ├── AuditLog.tsx
+│   │   │   │   ├── Approval.tsx
+│   │   │   │   └── Settings.tsx
+│   │   │   └── components/             # 通用组件
+│   │   └── shared/                     # 共享类型
+│   │       └── types.ts
+│   ├── recipes/                        # YAML 工具配方
+│   │   ├── recon/                      # 信息收集
+│   │   ├── web/                        # Web 安全
+│   │   └── ...
+│   ├── agents/                         # 智能体角色定义
+│   │   ├── recon.md
+│   │   └── ...
+│   ├── dsh.plugin.json                 # 插件清单
+│   └── package.json
+├── electron-builder.yml                # 打包配置
+├── package.json                        # 根 package.json
+└── .github/
+    └── workflows/
+        └── release.yml                 # GitHub Actions
+```
+
+### 2.3 Cordis 插件机制要点
+
+**插件声明**：每个 Cordis 插件通过导出 `apply(ctx)` 函数来注册能力。Desktop 专用插件通过 `inject` 声明对 `desktopProfiles` 和 `desktopPnpm` 的依赖。
+
+**effect 生命周期**：插件通过 `ctx.effect(() => { return async () => { /* 清理逻辑 */ } }, '描述')` 注册副作用，确保插件卸载时副作用可完整回滚。
+
+**兼容模式**：如果插件需要同时在普通 `dsh web` 和 Desktop 中运行，不要将 Desktop service 放在顶层 `inject` 中，而是先注入普通依赖，再通过 `ctx.get('desktopProfiles')` 动态探测。
+
+
+## 3. 插件开发规范
+
+### 3.1 插件入口（Host face）
+
+```typescript
+// dsh-plugin-cyber/src/host/index.ts
+import type { Context } from '@deepseek-ai/cordis'
+import { CyberDatabase } from './database'
+import { AuditLogger } from './audit'
+import { ToolRegistry } from './tools/registry'
+import { AgentOrchestrator } from './agent/orchestrator'
+
+export const name = 'dsh-plugin-cyber'
+export const inject = ['webServer', 'loader']
+
+export function apply(ctx: Context, config: CyberConfig): void {
+  // 1. 初始化数据库
+  const db = new CyberDatabase(ctx, config.dbPath)
+
+  // 2. 初始化审计日志
+  const audit = new AuditLogger(db)
+
+  // 3. 注册工具配方
+  const tools = new ToolRegistry(ctx)
+  tools.loadRecipes('recipes/')
+
+  // 4. 初始化 AI 编排器
+  const orchestrator = new AgentOrchestrator(ctx, { db, audit, tools })
+
+  // 5. 注册 HTTP 路由
+  ctx.route('/api/cyber/assets', assetHandler(db))
+  ctx.route('/api/cyber/vulnerabilities', vulnHandler(db))
+  ctx.route('/api/cyber/audit', auditHandler(audit))
+  ctx.route('/api/cyber/agent/stream', agentStreamHandler(orchestrator))
+
+  // 6. 注册 Cordis service
+  ctx.service('cyberDB', db)
+  ctx.service('cyberAudit', audit)
+
+  // 7. 注册 effect 清理
+  ctx.effect(() => {
+    return async () => {
+      await orchestrator.dispose()
+      db.close()
+    }
+  }, 'dsh-cyber cleanup')
+}
+```
+
+### 3.2 插件清单
+
+```json
+// dsh-plugin-cyber/dsh.plugin.json
+{
+  "name": "dsh-plugin-cyber",
+  "version": "1.0.0",
+  "displayName": "DSH Cyber",
+  "description": "AI 原生安全智能执行中枢",
+  "host": {
+    "entry": "lib/host/index.js",
+    "services": ["cyberDB", "cyberAudit"]
+  },
+  "client": {
+    "entry": "lib/client/index.js",
+    "slots": [
+      { "name": "sidebar", "position": "after", "target": "home" },
+      { "name": "root", "position": "replace" }
+    ]
+  },
+  "dependencies": {
+    "dsh-plugin-desktop": ">=2.0.15"
+  }
+}
+```
+
+
+## 4. 核心功能模块
+
+### 4.1 AI 智能体编排
+
+CyberStrikeAI 使用 Eino 框架支持单智能体及 Deep、Plan-Execute、Supervisor 多智能体模式。dsh-cyber 在 TypeScript 中重新实现：
+
+```typescript
+// dsh-plugin-cyber/src/host/agent/orchestrator.ts
+export class AgentOrchestrator {
+  async run(mode: AgentMode, input: AgentInput): Promise<AgentOutput> {
+    switch (mode) {
+      case 'single':
+        return this.runSingleAgent(input)
+      case 'plan-execute':
+        return this.runPlanExecute(input)
+      case 'deep':
+        return this.runDeepAgent(input)
+      case 'supervisor':
+        return this.runSupervisor(input)
+    }
+  }
+
+  private async runPlanExecute(input: AgentInput): Promise<AgentOutput> {
+    // 1. Planner Agent 生成执行计划
+    const plan = await this.plannerAgent.plan(input.message)
+    // 2. 逐步骤执行
+    const results = []
+    for (const step of plan.steps) {
+      const result = await this.executorAgent.execute(step)
+      results.push(result)
+      if (result.requiresApproval) {
+        await this.approvalWorkflow.requestApproval(result)
+      }
+    }
+    // 3. 汇总结果
+    return this.summarize(results)
+  }
+}
+```
+
+### 4.2 YAML 工具配方系统
+
+CyberStrikeAI 通过基于 YAML 的扩展系统集成 100+ 预构建工具配方（Nmap、Sqlmap、Nuclei 等），工具以 YAML 配方形式定义在 `tools/` 目录中。
+
+```yaml
+# dsh-plugin-cyber/recipes/recon/nmap.yaml
+name: nmap
+display_name: Nmap 端口扫描
+category: recon
+description: 网络端口扫描与服务识别
+command: nmap
+args:
+  - name: target
+    type: string
+    required: true
+    description: 目标 IP 或域名
+  - name: ports
+    type: string
+    default: "1-1000"
+    description: 端口范围
+  - name: flags
+    type: string
+    default: "-sV -sC"
+    description: 扫描参数
+timeout: 300
+risk_level: low
+requires_approval: false
+output_parser: nmap-xml
+```
+
+```typescript
+// dsh-plugin-cyber/src/host/tools/recipe-parser.ts
+export interface ToolRecipe {
+  name: string
+  display_name: string
+  category: string
+  command: string
+  args: ToolArg[]
+  timeout: number
+  risk_level: 'low' | 'medium' | 'high' | 'critical'
+  requires_approval: boolean
+  output_parser?: string
+}
+
+export class RecipeParser {
+  parse(filePath: string): ToolRecipe {
+    const content = fs.readFileSync(filePath, 'utf-8')
+    const raw = yaml.parse(content)
+    return this.validate(raw)
+  }
+}
+
+// dsh-plugin-cyber/src/host/tools/executor.ts
+export class ToolExecutor {
+  async execute(recipe: ToolRecipe, params: Record<string, any>): Promise<ToolResult> {
+    const args = recipe.args.map(a => params[a.name] ?? a.default)
+    const startTime = Date.now()
+
+    const { stdout, stderr, exitCode } = await execFileAsync(
+      recipe.command,
+      args,
+      { timeout: recipe.timeout * 1000 }
+    )
+
+    const result: ToolResult = {
+      recipe: recipe.name,
+      params,
+      stdout,
+      stderr,
+      exitCode,
+      duration: Date.now() - startTime,
+      timestamp: new Date().toISOString()
+    }
+
+    // 审计记录
+    await this.audit.append({
+      action: 'tool_exec',
+      recipe: recipe.name,
+      params,
+      result: { exitCode, duration: result.duration }
+    })
+
+    return result
+  }
+}
+```
+
+### 4.3 审计哈希链
+
+采用 SQLite 哈希链 + 只追加 JSONL 方案。每条审计日志的哈希值包含上一条日志的哈希值，形成链式结构。一旦任何记录被篡改，后续所有哈希值将不匹配。
+
+```sql
+-- dsh-plugin-cyber/src/host/database/schema.ts (SQL 部分)
+CREATE TABLE IF NOT EXISTS audit_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  seq         INTEGER NOT NULL,
+  timestamp   TEXT    NOT NULL,
+  action      TEXT    NOT NULL,
+  actor       TEXT,
+  target      TEXT,
+  detail      TEXT,      -- JSON
+  prev_hash   TEXT,
+  hash        TEXT    NOT NULL,
+  chain_key   TEXT    NOT NULL DEFAULT '@system',
+  UNIQUE(chain_key, seq)
+);
+
+CREATE INDEX idx_audit_chain ON audit_log(chain_key, seq);
+```
+
+```typescript
+// dsh-plugin-cyber/src/host/audit/hash-chain.ts
+import { createHash } from 'node:crypto'
+
+export class AuditLogger {
+  private db: CyberDatabase
+  private jsonlPath: string
+
+  async append(entry: AuditEntry): Promise<void> {
+    const prev = this.getLastEntry(entry.chainKey ?? '@system')
+    const seq = (prev?.seq ?? 0) + 1
+    const prevHash = prev?.hash ?? null
+
+    const payload = {
+      seq,
+      timestamp: new Date().toISOString(),
+      action: entry.action,
+      actor: entry.actor ?? '@system',
+      target: entry.target,
+      detail: JSON.stringify(entry.detail),
+      prev_hash: prevHash
+    }
+
+    const hash = createHash('sha256')
+      .update(JSON.stringify(payload))
+      .digest('hex')
+
+    // 写入 SQLite
+    this.db.prepare(`
+      INSERT INTO audit_log (seq, timestamp, action, actor, target, detail, prev_hash, hash, chain_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(seq, payload.timestamp, payload.action, payload.actor,
+           payload.target, payload.detail, prevHash, hash, entry.chainKey ?? '@system')
+
+    // 追加写入 JSONL
+    fs.appendFileSync(this.jsonlPath, JSON.stringify({ ...payload, hash }) + '\n')
+  }
+
+  async verify(chainKey = '@system'): Promise<VerifyResult> {
+    const rows = this.db.prepare(
+      'SELECT * FROM audit_log WHERE chain_key = ? ORDER BY seq ASC'
+    ).all(chainKey)
+
+    let brokenAt: number | null = null
+    let expectedPrevHash: string | null = null
+
+    for (const row of rows) {
+      // 检查 prev_hash 链
+      if (row.prev_hash !== expectedPrevHash) {
+        brokenAt = row.seq
+        break
+      }
+      // 重算 hash 验证
+      const payload = {
+        seq: row.seq,
+        timestamp: row.timestamp,
+        action: row.action,
+        actor: row.actor,
+        target: row.target,
+        detail: row.detail,
+        prev_hash: row.prev_hash
+      }
+      const computed = createHash('sha256')
+        .update(JSON.stringify(payload))
+        .digest('hex')
+
+      if (computed !== row.hash) {
+        brokenAt = row.seq
+        break
+      }
+      expectedPrevHash = row.hash
+    }
+
+    return {
+      ok: brokenAt === null,
+      total: rows.length,
+      brokenAt
+    }
+  }
+}
+```
+
+**校验命令**（供 UI 按钮调用）：
+
+```typescript
+// 点击“校验审计完整性”按钮时触发
+const result = await audit.verify()
+if (result.ok) {
+  showNotification('审计日志完整，未发现篡改')
+} else {
+  showAlert(`审计日志在序号 ${result.brokenAt} 处断裂，可能已被篡改`)
+}
+```
+
+### 4.4 资产与漏洞管理
+
+```sql
+CREATE TABLE IF NOT EXISTS asset (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  type        TEXT    NOT NULL,  -- domain | ip | port | service
+  value       TEXT    NOT NULL,
+  parent_id   INTEGER,
+  metadata    TEXT,      -- JSON
+  created_at  TEXT    NOT NULL,
+  updated_at  TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS vulnerability (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  title       TEXT    NOT NULL,
+  severity    TEXT    NOT NULL,  -- critical | high | medium | low | info
+  status      TEXT    NOT NULL DEFAULT 'open',  -- open | confirmed | fixed | false_positive
+  asset_id    INTEGER REFERENCES asset(id),
+  description TEXT,
+  evidence    TEXT,      -- JSON
+  created_at  TEXT    NOT NULL,
+  updated_at  TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  type        TEXT    NOT NULL,  -- scan | exploit | recon
+  status      TEXT    NOT NULL DEFAULT 'pending',
+  recipe      TEXT,
+  params      TEXT,      -- JSON
+  result      TEXT,      -- JSON
+  created_at  TEXT    NOT NULL
+);
+```
+
+### 4.5 审批中心与治理
+
+```typescript
+// dsh-plugin-cyber/src/host/approval/workflow.ts
+export type RiskLevel = 'low' | 'medium' | 'high' | 'critical'
+
+export interface ApprovalRule {
+  riskLevel: RiskLevel
+  requiresApproval: boolean
+  approver: 'user' | 'audit-agent' | 'both'
+}
+
+export class ApprovalWorkflow {
+  private rules: ApprovalRule[] = [
+    { riskLevel: 'low',      requiresApproval: false, approver: 'user' },
+    { riskLevel: 'medium',   requiresApproval: true,  approver: 'user' },
+    { riskLevel: 'high',     requiresApproval: true,  approver: 'both' },
+    { riskLevel: 'critical', requiresApproval: true,  approver: 'both' },
+  ]
+
+  async check(recipe: ToolRecipe, params: Record<string, any>): Promise<ApprovalResult> {
+    // 1. 检查工具白名单
+    if (!this.isWhitelisted(recipe.name)) {
+      return { approved: false, reason: '工具不在白名单中' }
+    }
+
+    // 2. 检查风险等级
+    const rule = this.rules.find(r => r.riskLevel === recipe.risk_level)
+    if (rule?.requiresApproval) {
+      return this.requestApproval(recipe, params, rule)
+    }
+
+    // 3. 审计记录
+    await this.audit.append({
+      action: 'approval_auto_pass',
+      recipe: recipe.name,
+      params
+    })
+
+    return { approved: true, reason: '自动放行（低风险）' }
+  }
+}
+```
+
+**WebShell / C2 占位符**（第一期不实现执行器）：
+
+```typescript
+// 仅注册 UI 入口和审批流，不包含任何执行代码
+const HIGH_RISK_FEATURES = {
+  webshell: {
+    enabled: false,       // 默认关闭
+    uiSlot: 'sidebar',
+    label: 'WebShell 管理',
+    message: '本功能为高级模块，当前个人版已禁用。如需使用，请在企业授权环境中通过插件挂载方式接入。',
+    approvalRequired: true
+  },
+  c2: {
+    enabled: false,
+    uiSlot: 'sidebar',
+    label: 'C2 控制台',
+    message: '本功能为高级模块，当前个人版已禁用。',
+    approvalRequired: true
+  }
+}
+```
+
+
+## 5. 打包与交付
+
+### 5.1 electron-builder 配置
+
+```yaml
+# electron-builder.yml
+appId: com.liumiya63.dsh-cyber
+productName: dsh-cyber
+directories:
+  output: dist
+  buildResources: build
+files:
+  - "dsh-plugin-desktop/lib/**"
+  - "dsh-plugin-cyber/lib/**"
+  - "dsh-plugin-cyber/recipes/**"
+  - "dsh-plugin-cyber/agents/**"
+  - "node_modules/**"
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: "${productName}-${version}-Windows-Setup.${ext}"
+  shortcutName: dsh-cyber
+portable:
+  artifactName: "${productName}-${version}-Windows-Portable.${ext}"
+```
+
+### 5.2 package.json 脚本
+
+```json
+{
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dist:win": "electron-builder --win nsis --x64",
+    "dist:portable": "electron-builder --win portable --x64",
+    "dist:all": "npm run build && npm run dist:win && npm run dist:portable"
+  }
+}
+```
+
+### 5.3 未签名交付说明
+
+由于没有 Windows EV 证书和 SafeNet Token，交付的 `.exe` 为未签名版本。用户首次运行时需要：
+1. 点击“更多信息”
+2. 点击“仍要运行”
+
+建议在 README 和安装引导中添加 SmartScreen 放行说明。
+
+### 5.4 GitHub Actions 自动构建
+
+```yaml
+# .github/workflows/release.yml
+name: Release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm run dist:all
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*Setup.exe
+            dist/*Portable.exe
+```
+
+### 5.5 更新策略
+
+测试阶段使用 **GitHub Releases 作为 generic URL** 更新源，不开启静默自动更新。在设置页提供“手动检查更新”按钮：
+
+```typescript
+async function checkForUpdates(): Promise<void> {
+  const res = await fetch(
+    'https://api.github.com/repos/liumiya63-arch/dsh-cy/releases/latest'
+  )
+  const release = await res.json()
+  const latestVersion = release.tag_name.replace(/^v/, '')
+  const currentVersion = app.getVersion()
+
+  if (semver.gt(latestVersion, currentVersion)) {
+    showUpdateDialog({
+      version: latestVersion,
+      url: release.assets.find(a => a.name.includes('Portable'))?.browser_download_url
+    })
+  } else {
+    showNotification('当前已是最新版本')
+  }
+}
+```
+
+
+## 6. 开发路线图
+
+### 第一期：基础设施 + 核心框架（4-6 周）
+
+**目标**：dsh-cyber 插件能在 DSH Desktop 中加载，有基本 UI，能调用 LLM。
+
+| 任务 | 产出 |
+|---|---|
+| 插件骨架 | `dsh-plugin-cyber` 可被 Cordis 加载 |
+| AI 对话页 | 侧边栏“安全助手”入口，复用 DSH 对话组件 |
+| SQLite 持久化 | better-sqlite3 集成，资产/漏洞/任务表 |
+| LLM 适配层 | OpenAI/DeepSeek/Ollama 兼容端点 |
+| 审计哈希链 | SQLite 哈希链 + JSONL，一键校验 |
+| 打包验证 | 产出未签名 NSIS + Portable exe |
+
+### 第二期：安全功能核心（6-8 周）
+
+| 任务 | 产出 |
+|---|---|
+| 资产管理 | 域名/IP/端口/服务 CRUD + 导入导出 |
+| 工具配方系统 | YAML 解析器 + 子进程执行器 + 超时控制 |
+| 漏洞管理 | 严重程度分级、状态流转、关联资产 |
+| 攻击链图谱 | D3.js / AntV G6 可视化 |
+| 审批中心 | 工具白名单、审批模式、审计 Agent |
+| 仪表盘 | 统计图表、任务概览 |
+
+### 第三期：高级功能 + 正式打包（4-6 周）
+
+| 任务 | 产出 |
+|---|---|
+| RAG 知识库 | LanceDB / Chroma 向量检索 |
+| 多智能体模式 | Plan-Execute / Deep / Supervisor |
+| WebShell/C2 占位符 | UI 入口 + 审批流，不实现执行器 |
+| GitHub Actions | tag 触发自动构建 + Release |
+| 文档 | README + 使用指南 + 插件开发文档 |
+
+
+## 7. 合规与安全声明
+
+### 7.1 许可证合规
+
+- **DSH Desktop**：MIT 许可证，可自由 fork 和二次开发。
+- **CyberStrikeAI**：AGPL-3.0（以实际仓库为准）。dsh-cyber **不得直接复制 CyberStrikeAI 源码**，只参考功能设计独立实现。
+
+### 7.2 使用边界
+
+> **dsh-cyber 仅可用于自有系统或已获得明确授权的安全测试。**
+
+- 高风险功能（WebShell、C2）默认关闭，第一期不实现执行器。
+- 所有工具执行必须经过审批流和审计日志。
+- 用户需在设置中确认已获得授权后方可使用工具。
+
+### 7.3 项目 README 声明模板
+
+```markdown
+## 安全声明
+
+dsh-cyber 是一个 AI 原生安全测试辅助工具，仅可用于：
+- 你拥有完全控制权的系统
+- 已获得明确书面授权的渗透测试目标
+- 教育目的和受控实验环境
+
+严禁将本工具用于任何未经授权的访问、入侵或恶意攻击行为。
+开发者不对任何滥用行为承担责任。
+
+## 高风险功能说明
+
+WebShell 管理和 C2 功能在当前版本中仅提供 UI 占位符和审批流接口，
+不包含可用的执行器。这些功能默认关闭，无法在本地直接开启。
+```
+
+
+## 8. 附录
+
+### 8.1 关键依赖
+
+| 依赖 | 用途 | 版本要求 |
+|---|---|---|
+| `dsh-plugin-desktop` | DSH Desktop 宿主 | >=2.0.15 |
+| `@deepseek-ai/cordis` | Cordis 插件框架 | 官方 contract |
+| `better-sqlite3` | SQLite 持久化 | ^11.x |
+| `js-yaml` | YAML 配方解析 | ^4.x |
+| `lancedb` 或 `chromadb` | 向量检索 | 按需 |
+| `antv/g6` 或 `d3` | 攻击链图谱 | 按需 |
+
+### 8.2 参考链接
+
+- DSH Desktop 仓库：https://github.com/anywhere-labs/dsh-desktop
+- DSH Desktop 插件开发文档：`docs/plugin-development.md`
+- DSH Desktop 插件服务契约：`dsh-plugin-desktop/docs/plugin-services.md`
+- CyberStrikeAI 仓库：https://github.com/AIPentest/CyberStrikeAI
+- CyberStrikeAI 架构文档：`docs/en-US/architecture.md`
+- electron-builder 文档：https://www.electron.build
+
+### 8.3 常见问题
+
+**Q：为什么不能在 renderer 中直接访问文件系统？**  
+A：DSH Desktop 的 renderer 是沙箱化的，不暴露原始 Electron API。所有文件操作必须通过 IPC 或 HTTP 路由在 Host 端执行。
+
+**Q：如何调试插件？**  
+A：在 Host 端使用 `ctx.logger.info()` 输出日志，在 Client 端使用浏览器 DevTools（DSH Desktop 支持开发者模式）。
+
+**Q：工具执行超时怎么处理？**  
+A：`ToolExecutor.execute()` 中通过 `execFileAsync` 的 `timeout` 选项控制，超时后自动 kill 子进程并记录审计日志。

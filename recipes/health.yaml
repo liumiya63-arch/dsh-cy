@@ -1,0 +1,7 @@
+name: node-health
+command: '@node-health'
+args: []
+parameters: {}
+timeout: 10
+risk_level: low
+requires_approval: false

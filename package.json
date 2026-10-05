@@ -1,0 +1,15 @@
+{
+  "name": "@liumiya63/dsh-cyber",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cyber workspace integrated into DSH",
+  "exports": { ".": "./lib/host/index.js", "./client": "./client.js", "./package.json": "./package.json", "./locale/*.json": "./locale/*.json" },
+  "files": ["lib", "client.js", "recipes", "locale", "icon.svg", "cordis.patch.yml"],
+  "icon": "./icon.svg",
+  "engines": { "node": ">=22.13" },
+  "scripts": { "build": "tsc", "test": "node --import tsx --test tests/*.test.ts", "check": "npm run build && node --check client.js && npm test" },
+  "dependencies": { "yaml": "^2.8.1" },
+  "devDependencies": { "typescript": "^5.9.3", "@types/node": "^24.0.0", "tsx": "^4.20.0" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" }, "client": { "platform": "web", "immediately": true, "inject": ["@deepseek-ai/dsh-client-ui-layout"] } }
+}

@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-cyber
+      name: '@liumiya63/dsh-cyber'
+      config: {}
